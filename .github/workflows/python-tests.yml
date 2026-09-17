@@ -1,0 +1,81 @@
+# iCUBE 리포트 쿼리 팩의 정적 검사와 파이썬 테스트를 PR 시점에 돌린다.
+#
+# 이 저장소는 public 이고 템플릿(is_template)이므로 아래 세 가지를 지킨다.
+#   - 외부에서 오는 코드를 특권으로 실행하지 않는다   → pull_request_target 을 쓰지 않는다
+#   - 토큰에 필요 이상의 권한을 주지 않는다            → contents: read 만
+#   - 서드파티 코드를 태그가 아닌 커밋으로 고정한다    → 액션을 SHA 로 핀
+#
+# 경로 필터를 건 이유는 두 가지다. 관계없는 변경에 빨간불이 켜지지 않게 하는 것과,
+# 이 저장소를 템플릿으로 만든 새 저장소에서 파이썬 파일이 없는 채로 워크플로가
+# 돌아 첫 화면부터 실패로 보이는 일을 막는 것.
+
+name: Python tests
+
+on:
+  pull_request:
+    paths:
+      - 'icube-erp-reports/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - 'requirements-ci.txt'
+      - '.github/workflows/python-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'icube-erp-reports/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - 'requirements-ci.txt'
+      - '.github/workflows/python-tests.yml'
+
+# 최소 권한. 이 워크플로는 저장소를 읽기만 한다.
+# 기존 deploy-pages.yml 은 gh-pages 에 커밋해야 해서 contents: write 를 쓰지만,
+# 여기서는 쓰기 권한이 필요 없다.
+permissions:
+  contents: read
+
+# 같은 브랜치에 연속으로 푸시하면 앞 실행을 취소한다.
+# 배포 워크플로(group: gh-pages-erp-ai)와 그룹이 달라 서로 간섭하지 않는다.
+concurrency:
+  group: python-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # 린터와 테스트가 한글을 출력한다. 러너의 stdout 이 ASCII 로 잡히면
+      # UnicodeEncodeError 로 죽으므로 명시한다.
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      # 액션은 태그가 아닌 커밋 SHA 로 고정한다. 태그는 옮길 수 있어서,
+      # 공급망 공격에 태그가 재지정되면 그대로 실행된다.
+      - name: 체크아웃
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # 이 워크플로는 푸시하지 않는다. 토큰을 .git/config 에 남기지 않는다.
+          persist-credentials: false
+
+      - name: 파이썬 준비
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+
+      # 린터는 표준 라이브러리만 쓴다. 의존성을 받기 전에 먼저 돌려서,
+      # 어느 파일 몇 번째 줄이 왜 걸렸는지를 로그에 그대로 남긴다.
+      - name: 정적 검사 (SQL 46개)
+        run: python icube-erp-reports/tools/lint_icube_sql.py
+
+      # requirements.txt 는 범위로 열려 있어 매 실행마다 그때의 최신 버전을 받는다.
+      # 잠금 파일은 버전과 파일 해시를 함께 고정하고, --require-hashes 로
+      # 해시가 하나라도 어긋나면 설치를 통째로 거부한다.
+      - name: 의존성 설치 (버전·해시 고정)
+        run: |
+          python -m pip install --disable-pip-version-check \
+            --require-hashes -r requirements-ci.txt
+
+      - name: 테스트
+        run: python -m pytest tests/ -q

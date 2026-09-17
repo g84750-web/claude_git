@@ -82,19 +82,37 @@ _NOT_ALIAS = {
 
 
 def resolve_alias(unit: Unit, alias: str, pos: int) -> Optional[str]:
-    """`pos` 앞쪽에서 가장 가까운 선언을 찾아 별칭이 가리키는 테이블을 돌려준다.
+    """별칭이 가리키는 테이블을 찾는다.
 
-    한 파일 안에서 같은 별칭(`D`, `H`, `T`)이 구문마다 다른 테이블에 붙는다.
-    파일 전체에서 아무 선언이나 집으면 엉뚱한 테이블로 읽힌다.
+    두 가지를 함께 처리해야 한다.
+
+      - `SELECT A.PJT_CD FROM ADOCUD A`  선언이 사용보다 **뒤에** 온다.
+        SELECT 목록의 컬럼 참조가 늘 이 모양이라 앞쪽만 뒤지면 대부분을 놓친다.
+      - 한 파일 안에서 같은 별칭(`D`, `H`, `T`)이 구문마다 다른 테이블에 붙는다.
+        파일 전체에서 아무 선언이나 집으면 엉뚱한 테이블로 읽는다.
+
+    그래서 `;` 로 끊은 같은 구문 안에서 **가장 가까운** 선언을 쓴다.
+    구문 안에 없으면(동적 SQL 조각은 `;` 가 없을 수 있다) 앞쪽에서 가장 가까운
+    선언으로 물러선다.
     """
-    found: Optional[str] = None
     want = alias.upper()
-    for m in _BINDING.finditer(unit.code[:pos]):
-        if m.group(2).upper() in _NOT_ALIAS:
-            continue
-        if m.group(2).upper() == want:
-            found = m.group(1)
-    return found
+    code = unit.code
+
+    lo = code.rfind(";", 0, pos) + 1
+    hi = code.find(";", pos)
+    hi = len(code) if hi == -1 else hi
+
+    def nearest(start: int, end: int) -> Optional[str]:
+        best, best_d = None, None
+        for m in _BINDING.finditer(code[start:end]):
+            if m.group(2).upper() in _NOT_ALIAS or m.group(2).upper() != want:
+                continue
+            d = abs((start + m.start(2)) - pos)
+            if best_d is None or d < best_d:
+                best, best_d = m.group(1), d
+        return best
+
+    return nearest(lo, hi) or nearest(0, pos)
 
 
 def alias_is(unit: Unit, alias: str, pos: int, table: str) -> bool:

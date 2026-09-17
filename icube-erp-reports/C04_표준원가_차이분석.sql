@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] C-04  표준원가 대비 실제원가 차이분석                                    (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : 계획(표준) 대비 실제 재료비가 왜 벌어졌는지를 **수량차이 / 단가차이**로 분해한다.
@@ -63,6 +63,7 @@ DECLARE
     ,@COST_YR      NVARCHAR(4)   = NULL           -- ('TAV') NULL=LEFT(@TO_DT,4)
     ,@COST_CHASU   NUMERIC(3,0)  = NULL           -- ('TAV') NULL=최종차수
     ,@TAV_YM       NVARCHAR(6)   = NULL           -- ('INV') NULL=@TO_DT 의 월
+    ,@GISU         INT           = NULL           -- ('INV') 재고평가 기수. NULL = 자동 판정
     ,@PUR_FR_DT    NVARCHAR(8)   = NULL           -- ('PUR') NULL=@FR_DT-1년
 
     ,@INC_BAD_YN   NVARCHAR(1)   = N'N'
@@ -77,6 +78,8 @@ SET @TAV_YM      = ISNULL(@TAV_YM, LEFT(@TO_DT, 6));
 SET @PUR_FR_DT   = ISNULL(@PUR_FR_DT, CONVERT(NVARCHAR(8), DATEADD(YEAR,-1,CONVERT(DATE,@FR_DT)), 112));
 
 DECLARE @SQL NVARCHAR(MAX);
+-- LINV_TAV 기수 필터 조각. GISU 컬럼이 없는 사이트에서는 빈 문자열로 남는다
+DECLARE @GI_FLT NVARCHAR(100) = N'';
 
 IF OBJECT_ID('tempdb..#PRD')     IS NOT NULL DROP TABLE #PRD;
 IF OBJECT_ID('tempdb..#BOM_SRC') IS NOT NULL DROP TABLE #BOM_SRC;
@@ -270,7 +273,7 @@ IF @UM_BASE_FG = N'TAV' AND OBJECT_ID(N'dbo.CIV_PUR_TAV', N'U') IS NOT NULL
 BEGIN
     IF @COST_CHASU IS NULL
     BEGIN
-        SET @SQL = N'SELECT @o = MAX(CHASU) FROM dbo.CIV_PUR_TAV
+        SET @SQL = N'SELECT @o = MAX(CHASU) FROM dbo.CIV_PUR_TAV WITH (NOLOCK)
                       WHERE CO_CD=@p_CO AND P_YR=@p_YR AND (@p_DIV IS NULL OR DIV_CD=@p_DIV)';
         EXEC sp_executesql @SQL
             ,N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_YR NVARCHAR(4), @o NUMERIC(3,0) OUTPUT'
@@ -295,6 +298,23 @@ END
 
 IF @UM_BASE_FG = N'INV' AND OBJECT_ID(N'dbo.LINV_TAV', N'U') IS NOT NULL
 BEGIN
+    -- 기수(GISU) 확정 : 빠뜨리면 과거 기수의 평가단가까지 함께 평균된다 (CLAUDE.md 2장)
+    -- GISU 컬럼이 없는 사이트에서는 필터를 붙이지 않아 종전과 동일하게 동작한다
+    SET @GI_FLT = N'';
+    IF COL_LENGTH(N'dbo.LINV_TAV', N'GISU') IS NOT NULL
+    BEGIN
+        IF @GISU IS NULL
+        BEGIN
+            SET @SQL = N'SELECT @o = MAX(GISU) FROM dbo.LINV_TAV WITH (NOLOCK)
+                         WHERE CO_CD = @p_CO AND @p_YM BETWEEN SMM AND FMM';
+            BEGIN TRY
+                EXEC sp_executesql @SQL
+                    ,N'@p_CO NVARCHAR(4), @p_YM NVARCHAR(6), @o INT OUTPUT'
+                    ,@p_CO=@CO_CD, @p_YM=@TAV_YM, @o=@GISU OUTPUT;
+            END TRY BEGIN CATCH END CATCH
+        END
+        SET @GI_FLT = N' AND (@p_GI IS NULL OR GISU = @p_GI)';
+    END
     SET @SQL = N'
         UPDATE U SET ACT_UM = X.UM, UM_SRC = N''재고평가출고단가(LINV_TAV)''
         FROM   #UM U
@@ -302,12 +322,12 @@ BEGIN
                            ,UM = CAST(AVG(CAST(ISNULL(ISU_UM,0) AS DECIMAL(19,6))) AS DECIMAL(19,6))
                      FROM   dbo.LINV_TAV WITH (NOLOCK)
                      WHERE  CO_CD=@p_CO AND @p_YM BETWEEN SMM AND FMM
-                       AND  (@p_DIV IS NULL OR DIV_CD=@p_DIV)
+                       AND  (@p_DIV IS NULL OR DIV_CD=@p_DIV)' + @GI_FLT + N'
                      GROUP BY CO_CD, ITEM_CD ) X
                ON X.CO_CD=U.CO_CD AND X.ITEM_CD=U.ITEM_CD';
-    EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_YM NVARCHAR(6)'
-        ,@p_CO=@CO_CD, @p_DIV=@DIV_CD, @p_YM=@TAV_YM;
-    PRINT N'[5] 실제단가 = 재고평가 (' + @TAV_YM + N')';
+    EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_YM NVARCHAR(6), @p_GI INT'
+        ,@p_CO=@CO_CD, @p_DIV=@DIV_CD, @p_YM=@TAV_YM, @p_GI=@GISU;
+    PRINT N'[5] 실제단가 = 재고평가 (' + @TAV_YM + N' / 기수 ' + ISNULL(CAST(@GISU AS NVARCHAR(10)), N'전체') + N')';
 END
 
 IF @UM_BASE_FG = N'PUR'

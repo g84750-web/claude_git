@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] S-05 담당자별 매출이익  +  S-10 거래처·품목군별 판매추이                 (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : 매출을 **여러 축(담당·거래처·품목군)** 으로 갈라 보고, **전년 동기 대비** 로 추세를 본다.
@@ -37,12 +37,15 @@ DECLARE
     ,@EMP_CD   NVARCHAR(10) = NULL
     ,@GRP_CD   NVARCHAR(10) = NULL            -- 품목군
     ,@TH_CHG   DECIMAL(5,1) = 20.0            -- 증감 경고 기준 (%)
+    ,@GISU     INT          = NULL            -- 재고평가 기수 (NULL = 최신 기수 자동)
 ;
 
 -- 전년 동기
 DECLARE @LY_FR NVARCHAR(8) = CONVERT(NVARCHAR(8), DATEADD(YEAR,-1,CONVERT(DATE,@FR_DT)), 112);
 DECLARE @LY_TO NVARCHAR(8) = CONVERT(NVARCHAR(8), DATEADD(YEAR,-1,CONVERT(DATE,@TO_DT)), 112);
 DECLARE @SQL NVARCHAR(MAX);
+-- LINV_TAV 기수 필터 조각. GISU 컬럼이 없는 사이트에서는 빈 문자열로 남는다
+DECLARE @GI_FLT NVARCHAR(100) = N'';
 DECLARE @GRPCOL NVARCHAR(30) = NULL, @GRPTBL NVARCHAR(30) = NULL;
 
 IF OBJECT_ID('tempdb..#UM')  IS NOT NULL DROP TABLE #UM;
@@ -71,16 +74,32 @@ BEGIN
 END
 IF OBJECT_ID(N'dbo.LINV_TAV', N'U') IS NOT NULL
 BEGIN
+    -- 기수(GISU) 확정 : 빠뜨리면 과거 기수의 평가단가까지 함께 평균된다 (CLAUDE.md 2장)
+    -- GISU 컬럼이 없는 사이트에서는 필터를 붙이지 않아 종전과 동일하게 동작한다
+    SET @GI_FLT = N'';
+    IF COL_LENGTH(N'dbo.LINV_TAV', N'GISU') IS NOT NULL
+    BEGIN
+        IF @GISU IS NULL
+        BEGIN
+            SET @SQL = N'SELECT @o = MAX(GISU) FROM dbo.LINV_TAV WITH (NOLOCK)
+                         WHERE CO_CD = @p_CO';
+            BEGIN TRY
+                EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @o INT OUTPUT'
+                    ,@p_CO=@CO_CD, @o=@GISU OUTPUT;
+            END TRY BEGIN CATCH END CATCH
+        END
+        SET @GI_FLT = N' AND (@p_GI IS NULL OR T.GISU = @p_GI)';
+    END
     SET @SQL = N'
         INSERT INTO #UM (ITEM_CD, UM, SRC)
         SELECT T.ITEM_CD, CAST(AVG(CAST(NULLIF(T.ISU_UM,0) AS DECIMAL(19,6))) AS DECIMAL(19,6)), N''TAV''
         FROM   dbo.LINV_TAV T WITH (NOLOCK)
         WHERE  T.CO_CD = @p_CO AND ISNULL(T.ISU_UM,0) <> 0
           AND  (@p_DIV IS NULL OR T.DIV_CD = @p_DIV)
-          AND  NOT EXISTS (SELECT 1 FROM #UM U WHERE U.ITEM_CD = T.ITEM_CD)
+          AND  NOT EXISTS (SELECT 1 FROM #UM U WHERE U.ITEM_CD = T.ITEM_CD)' + @GI_FLT + N'
         GROUP BY T.ITEM_CD';
-    BEGIN TRY EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4)'
-        ,@p_CO=@CO_CD, @p_DIV=@DIV_CD; END TRY BEGIN CATCH END CATCH
+    BEGIN TRY EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_GI INT'
+        ,@p_CO=@CO_CD, @p_DIV=@DIV_CD, @p_GI=@GISU; END TRY BEGIN CATCH END CATCH
 END
 INSERT INTO #UM (ITEM_CD, UM, SRC)
 SELECT I.ITEM_CD, CAST(ISNULL(NULLIF(I.STD_UM,0), I.PUR_UM) AS DECIMAL(19,6)), N'STD'

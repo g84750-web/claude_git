@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] 원자재 수급 총괄현황 (MRP 기준)                                          (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : 수주(주문) 오더를 기점으로 BOM 을 다단계 전개하여 주문제품의 원자재 필요량을 추적하고,
@@ -916,7 +916,7 @@ BEGIN
     SET @SQL = N'
     DECLARE @p_exp NVARCHAR(8);
     SELECT  @p_exp = ISNULL(@p_in_exp, MAX(EXP_DT))
-    FROM    dbo.LDEMAND WHERE CO_CD = @p_CO_CD AND (@p_DIV IS NULL OR DIV_CD = @p_DIV);
+    FROM    dbo.LDEMAND WITH (NOLOCK) WHERE CO_CD = @p_CO_CD AND (@p_DIV IS NULL OR DIV_CD = @p_DIV);
 
     SELECT
          N''[G] ERP 소요량전개 대사''                 AS REPORT_NM

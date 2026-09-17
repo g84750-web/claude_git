@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] C-05  매출이익 분석 (품목 · 거래처 · 담당)                               (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : 무엇을 팔아서 얼마를 남겼는가. **역마진 거래를 찾아내는 것이 첫째 목적**이다.
@@ -51,6 +51,7 @@ DECLARE
     ,@EMP_CD   NVARCHAR(10) = NULL            -- 영업담당
     ,@UM_SRC   NVARCHAR(6)  = N'AUTO'         -- AUTO / PRD / FIFO / TAV / STD
     ,@CHASU    INT          = NULL            -- 원가차수 (NULL = 최신 마감차수)
+    ,@GISU     INT          = NULL            -- 재고평가 기수 (NULL = 최신 기수 자동)
 
     ,@TH_LOW   DECIMAL(5,1) = 10.0            -- 저마진 경고 기준 이익률 (%)
     ,@TH_TGT   DECIMAL(5,1) = 25.0            -- 목표 이익률 (%)  ※ 사이트 기준으로 교체
@@ -58,6 +59,8 @@ DECLARE
 
 DECLARE @P_YR NVARCHAR(4) = LEFT(@FR_DT, 4);
 DECLARE @SQL NVARCHAR(MAX);
+-- LINV_TAV 기수 필터 조각. GISU 컬럼이 없는 사이트에서는 빈 문자열로 남는다
+DECLARE @GI_FLT NVARCHAR(100) = N'';
 DECLARE @CH_ST NVARCHAR(20) = N'없음';
 
 IF OBJECT_ID('tempdb..#UM')  IS NOT NULL DROP TABLE #UM;
@@ -132,6 +135,22 @@ END
 -- (3) 기간 평가단가 LINV_TAV
 IF @UM_SRC IN (N'AUTO', N'TAV') AND OBJECT_ID(N'dbo.LINV_TAV', N'U') IS NOT NULL
 BEGIN
+    -- 기수(GISU) 확정 : 빠뜨리면 과거 기수의 평가단가까지 함께 평균된다 (CLAUDE.md 2장)
+    -- GISU 컬럼이 없는 사이트에서는 필터를 붙이지 않아 종전과 동일하게 동작한다
+    SET @GI_FLT = N'';
+    IF COL_LENGTH(N'dbo.LINV_TAV', N'GISU') IS NOT NULL
+    BEGIN
+        IF @GISU IS NULL
+        BEGIN
+            SET @SQL = N'SELECT @o = MAX(GISU) FROM dbo.LINV_TAV WITH (NOLOCK)
+                         WHERE CO_CD = @p_CO';
+            BEGIN TRY
+                EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @o INT OUTPUT'
+                    ,@p_CO=@CO_CD, @o=@GISU OUTPUT;
+            END TRY BEGIN CATCH END CATCH
+        END
+        SET @GI_FLT = N' AND (@p_GI IS NULL OR T.GISU = @p_GI)';
+    END
     SET @SQL = N'
         INSERT INTO #UM (ITEM_CD, UM, UM_SRC)
         SELECT T.ITEM_CD
@@ -140,11 +159,11 @@ BEGIN
         FROM   dbo.LINV_TAV T WITH (NOLOCK)
         WHERE  T.CO_CD = @p_CO AND ISNULL(T.ISU_UM, 0) <> 0
           AND  (@p_DIV IS NULL OR T.DIV_CD = @p_DIV)
-          AND  NOT EXISTS (SELECT 1 FROM #UM U WHERE U.ITEM_CD = T.ITEM_CD)
+          AND  NOT EXISTS (SELECT 1 FROM #UM U WHERE U.ITEM_CD = T.ITEM_CD)' + @GI_FLT + N'
         GROUP BY T.ITEM_CD';
     BEGIN TRY
-        EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4)'
-            ,@p_CO=@CO_CD, @p_DIV=@DIV_CD;
+        EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_GI INT'
+            ,@p_CO=@CO_CD, @p_DIV=@DIV_CD, @p_GI=@GISU;
         PRINT N'[1-3] TAV : ' + CAST(@@ROWCOUNT AS NVARCHAR(20)) + N' 품목';
     END TRY BEGIN CATCH PRINT N'[1-3] LINV_TAV 조회 실패'; END CATCH
 END

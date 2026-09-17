@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] P-03  실시간 재고 추적 (창고 · 장소 · LOT)                              (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : "지금 이 품목이 어느 창고 어느 장소에 몇 개, 어느 LOT 으로 있는가"를 즉시 답한다.
@@ -112,7 +112,7 @@ BEGIN
               ,SUM(CAST(ISNULL(V.IOPEN,0) AS DECIMAL(19,6)))
               ,SUM(CAST(ISNULL(V.IRCV ,0) AS DECIMAL(19,6)))
               ,SUM(CAST(ISNULL(V.IISU ,0) AS DECIMAL(19,6)))
-        FROM   dbo.VL_INVLC V
+        FROM   dbo.VL_INVLC V WITH (NOLOCK)
         WHERE  V.CO_CD = @p_CO AND V.P_YR = @p_YR
           AND  (@p_DIV  IS NULL OR V.DIV_CD  = @p_DIV)
           AND  (@p_ITEM IS NULL OR V.ITEM_CD = @p_ITEM)
@@ -136,7 +136,7 @@ BEGIN
               ,SUM(CASE WHEN V.GRP_FG = N''3'' THEN CAST(ISNULL(V.IISU,0) AS DECIMAL(19,6)) ELSE 0 END)
               ,SUM(CASE WHEN V.GRP_FG = N''6'' THEN CAST(ISNULL(V.IISU,0) AS DECIMAL(19,6)) ELSE 0 END)
               ,SUM(CASE WHEN V.GRP_FG = N''2'' THEN CAST(ISNULL(V.IRCV,0) AS DECIMAL(19,6)) ELSE 0 END)
-        FROM   dbo.L_INVSUM_LC V
+        FROM   dbo.L_INVSUM_LC V WITH (NOLOCK)
         WHERE  V.CO_CD = @p_CO AND V.P_YR = @p_YR
           AND  (@p_DIV  IS NULL OR V.DIV_CD  = @p_DIV)
           AND  (@p_ITEM IS NULL OR V.ITEM_CD = @p_ITEM)

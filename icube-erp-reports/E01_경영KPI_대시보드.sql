@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] E-01  경영 KPI 통합 대시보드                                             (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : 영업·생산·구매·원가 KPI 를 **한 화면 8개 타일**로 통합한다.
@@ -47,6 +47,7 @@ DECLARE
     ,@TGT_SHORT INT         = 0               -- 결품 품목수 목표
     ,@TGT_TURN DECIMAL(5,1) = 12.0            -- 재고회전율 목표 (회/년)
     ,@TGT_CVAR DECIMAL(5,1) = 3.0             -- 원가차이율 허용 (±%)
+    ,@GISU     INT          = NULL            -- 재고평가 기수 (NULL = 최신 기수 자동)
 ;
 
 DECLARE
@@ -57,6 +58,8 @@ DECLARE
     ,@NOW   NVARCHAR(20) = CONVERT(NVARCHAR(20), GETDATE(), 120)
 ;
 DECLARE @SQL NVARCHAR(MAX);
+-- LINV_TAV 기수 필터 조각. GISU 컬럼이 없는 사이트에서는 빈 문자열로 남는다
+DECLARE @GI_FLT NVARCHAR(100) = N'';
 DECLARE @CHASU INT = NULL, @CHASU_ST NVARCHAR(20) = N'미운영';
 
 IF OBJECT_ID('tempdb..#KPI') IS NOT NULL DROP TABLE #KPI;
@@ -379,15 +382,31 @@ CREATE TABLE #UM (ITEM_CD NVARCHAR(25), UM DECIMAL(19,6));
 
 IF OBJECT_ID(N'dbo.LINV_TAV', N'U') IS NOT NULL
 BEGIN
+    -- 기수(GISU) 확정 : 빠뜨리면 과거 기수의 평가단가까지 함께 평균된다 (CLAUDE.md 2장)
+    -- GISU 컬럼이 없는 사이트에서는 필터를 붙이지 않아 종전과 동일하게 동작한다
+    SET @GI_FLT = N'';
+    IF COL_LENGTH(N'dbo.LINV_TAV', N'GISU') IS NOT NULL
+    BEGIN
+        IF @GISU IS NULL
+        BEGIN
+            SET @SQL = N'SELECT @o = MAX(GISU) FROM dbo.LINV_TAV WITH (NOLOCK)
+                         WHERE CO_CD = @p_CO';
+            BEGIN TRY
+                EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @o INT OUTPUT'
+                    ,@p_CO=@CO_CD, @o=@GISU OUTPUT;
+            END TRY BEGIN CATCH END CATCH
+        END
+        SET @GI_FLT = N' AND (@p_GI IS NULL OR T.GISU = @p_GI)';
+    END
     SET @SQL = N'
         INSERT INTO #UM (ITEM_CD, UM)
         SELECT T.ITEM_CD, CAST(AVG(CAST(NULLIF(T.ISU_UM,0) AS DECIMAL(19,6))) AS DECIMAL(19,6))
         FROM   dbo.LINV_TAV T WITH (NOLOCK)
         WHERE  T.CO_CD = @p_CO AND ISNULL(T.ISU_UM,0) <> 0
-          AND  (@p_DIV IS NULL OR T.DIV_CD = @p_DIV)
+          AND  (@p_DIV IS NULL OR T.DIV_CD = @p_DIV)' + @GI_FLT + N'
         GROUP BY T.ITEM_CD';
     BEGIN TRY
-        EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4)', @p_CO=@CO_CD, @p_DIV=@DIV_CD;
+        EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_GI INT', @p_CO=@CO_CD, @p_DIV=@DIV_CD, @p_GI=@GISU;
     END TRY BEGIN CATCH END CATCH
 END
 INSERT INTO #UM (ITEM_CD, UM)

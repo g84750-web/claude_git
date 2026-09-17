@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] B-01  기준정보 마스터 품질 스코어카드                                    (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : KPI·EIS 리포트를 개발하기 **전에** 마스터 등록 상태를 계량화한다.
@@ -166,9 +166,9 @@ BEGIN
     SET @SQL = N'
       INSERT INTO #SCORE (영역, 항목, 전체, 미등록, 연계KPI)
       SELECT N''B.여신'', N''여신한도 LCR_LIMIT.YUSIN_AM''
-            ,(SELECT COUNT(*) FROM STRADE WHERE CO_CD=@p_CO AND ISNULL(USE_YN,N''1'')=N''1'' AND TR_FG IN (N''0'',N''2''))
-            ,(SELECT COUNT(*) FROM STRADE S WHERE S.CO_CD=@p_CO AND ISNULL(S.USE_YN,N''1'')=N''1'' AND S.TR_FG IN (N''0'',N''2'')
-               AND NOT EXISTS (SELECT 1 FROM dbo.LCR_LIMIT L
+            ,(SELECT COUNT(*) FROM STRADE WITH (NOLOCK) WHERE CO_CD=@p_CO AND ISNULL(USE_YN,N''1'')=N''1'' AND TR_FG IN (N''0'',N''2''))
+            ,(SELECT COUNT(*) FROM STRADE S WITH (NOLOCK) WHERE S.CO_CD=@p_CO AND ISNULL(S.USE_YN,N''1'')=N''1'' AND S.TR_FG IN (N''0'',N''2'')
+               AND NOT EXISTS (SELECT 1 FROM dbo.LCR_LIMIT L WITH (NOLOCK)
                                WHERE L.CO_CD=S.CO_CD AND L.TR_CD=S.TR_CD
                                  AND ISNULL(L.YUSIN_AM,0) > 0
                                  AND (@p_DIV IS NULL OR L.DIV_CD=@p_DIV)))

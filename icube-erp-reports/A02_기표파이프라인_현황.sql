@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] A-02 / A-03  마감 → 전표 → 장부 파이프라인 현황                          (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : 물류·영업 트랜잭션이 회계 전표로 넘어가 장부에 반영되기까지 어느 단계에서
@@ -203,7 +203,8 @@ FROM        LRCP H WITH (NOLOCK)
 OUTER APPLY (SELECT AM = SUM(CAST(ISNULL(X.NORMAL_AM,0) + ISNULL(X.BEFORE_AM,0) AS DECIMAL(19,4)))
              FROM   LRCP_D X WITH (NOLOCK)
              WHERE  X.CO_CD = H.CO_CD AND X.RCP_NB = H.RCP_NB
-               AND  ISNULL(X.USE_YN,N'1')=N'1' AND ISNULL(X.EXPIRE_YN,N'1')=N'1') D
+               AND  ISNULL(X.USE_YN,N'1')=N'1' AND ISNULL(X.EXPIRE_YN,N'1')=N'1'
+               AND  ISNULL(X.RCPAM_FG,N'0')=N'0') D   -- 영업모듈 수금만 (S04·S06·E01·A05 와 동일 기준)
 OUTER APPLY (SELECT TOP 1 HH.DOCU_ST, HH.DOCU_TY, HH.GET_FG
                    ,DR_AM = (SELECT SUM(CAST(ISNULL(DD.ACCT_AM,0) AS DECIMAL(19,4)))
                              FROM ADOCUD DD WITH (NOLOCK)

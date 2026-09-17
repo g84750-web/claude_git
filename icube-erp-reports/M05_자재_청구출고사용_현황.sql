@@ -1,4 +1,4 @@
-/*==============================================================================================
+﻿/*==============================================================================================
   [ iCUBE ] M-05  자재 청구 / 출고 / 사용 대비 현황                                  (Rev.1)
   ----------------------------------------------------------------------------------------------
   목적 : 작업지시에 청구된 자재가 실제로 불출되고 투입되었는지를 단계별로 추적한다.
@@ -53,6 +53,7 @@ DECLARE
 
     ,@UM_BASE_FG  NVARCHAR(3)  = N'INV'         -- 'INV' 재고평가 / 'PUR' 매입평균 / 'TAV' 원가확정 / 'STD' 구매단가
     ,@TAV_YM      NVARCHAR(6)  = NULL           -- ('INV') NULL = @TO_DT 의 월
+    ,@GISU        INT          = NULL           -- ('INV') 재고평가 기수. NULL = 자동 판정
     ,@COST_YR     NVARCHAR(4)  = NULL
     ,@COST_CHASU  NUMERIC(3,0) = NULL
     ,@PUR_FR_DT   NVARCHAR(8)  = NULL
@@ -69,6 +70,8 @@ SET @PUR_FR_DT   = ISNULL(@PUR_FR_DT, CONVERT(NVARCHAR(8), DATEADD(YEAR,-1,CONVE
 SET @BOM_BASE_DT = ISNULL(@BOM_BASE_DT, @TO_DT);
 
 DECLARE @SQL NVARCHAR(MAX);
+-- LINV_TAV 기수 필터 조각. GISU 컬럼이 없는 사이트에서는 빈 문자열로 남는다
+DECLARE @GI_FLT NVARCHAR(100) = N'';
 
 IF OBJECT_ID('tempdb..#WO')  IS NOT NULL DROP TABLE #WO;
 IF OBJECT_ID('tempdb..#REQ') IS NOT NULL DROP TABLE #REQ;
@@ -259,23 +262,40 @@ CREATE TABLE #UM ( CO_CD NVARCHAR(4), ITEM_CD NVARCHAR(30), MTL_UM DECIMAL(19,6)
 
 IF @UM_BASE_FG = N'INV' AND OBJECT_ID(N'dbo.LINV_TAV', N'U') IS NOT NULL
 BEGIN
+    -- 기수(GISU) 확정 : 빠뜨리면 과거 기수의 평가단가까지 함께 평균된다 (CLAUDE.md 2장)
+    -- GISU 컬럼이 없는 사이트에서는 필터를 붙이지 않아 종전과 동일하게 동작한다
+    SET @GI_FLT = N'';
+    IF COL_LENGTH(N'dbo.LINV_TAV', N'GISU') IS NOT NULL
+    BEGIN
+        IF @GISU IS NULL
+        BEGIN
+            SET @SQL = N'SELECT @o = MAX(GISU) FROM dbo.LINV_TAV WITH (NOLOCK)
+                         WHERE CO_CD = @p_CO AND @p_YM BETWEEN SMM AND FMM';
+            BEGIN TRY
+                EXEC sp_executesql @SQL
+                    ,N'@p_CO NVARCHAR(4), @p_YM NVARCHAR(6), @o INT OUTPUT'
+                    ,@p_CO=@CO_CD, @p_YM=@TAV_YM, @o=@GISU OUTPUT;
+            END TRY BEGIN CATCH END CATCH
+        END
+        SET @GI_FLT = N' AND (@p_GI IS NULL OR T.GISU = @p_GI)';
+    END
     SET @SQL = N'
         INSERT INTO #UM SELECT T.CO_CD, T.ITEM_CD
               ,CAST(AVG(CAST(ISNULL(T.ISU_UM,0) AS DECIMAL(19,6))) AS DECIMAL(19,6))
               ,N''재고평가출고단가(LINV_TAV)''
         FROM   dbo.LINV_TAV T WITH (NOLOCK)
         WHERE  T.CO_CD=@p_CO AND @p_YM BETWEEN T.SMM AND T.FMM
-          AND  (@p_DIV IS NULL OR T.DIV_CD=@p_DIV)
+          AND  (@p_DIV IS NULL OR T.DIV_CD=@p_DIV)' + @GI_FLT + N'
         GROUP BY T.CO_CD, T.ITEM_CD';
-    EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_YM NVARCHAR(6)'
-        ,@p_CO=@CO_CD, @p_DIV=@DIV_CD, @p_YM=@TAV_YM;
+    EXEC sp_executesql @SQL, N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_YM NVARCHAR(6), @p_GI INT'
+        ,@p_CO=@CO_CD, @p_DIV=@DIV_CD, @p_YM=@TAV_YM, @p_GI=@GISU;
 END
 
 IF @UM_BASE_FG = N'TAV' AND OBJECT_ID(N'dbo.CIV_PUR_TAV', N'U') IS NOT NULL
 BEGIN
     IF @COST_CHASU IS NULL
     BEGIN
-        SET @SQL = N'SELECT @o=MAX(CHASU) FROM dbo.CIV_PUR_TAV
+        SET @SQL = N'SELECT @o=MAX(CHASU) FROM dbo.CIV_PUR_TAV WITH (NOLOCK)
                       WHERE CO_CD=@p_CO AND P_YR=@p_YR AND (@p_DIV IS NULL OR DIV_CD=@p_DIV)';
         EXEC sp_executesql @SQL
             ,N'@p_CO NVARCHAR(4), @p_DIV NVARCHAR(4), @p_YR NVARCHAR(4), @o NUMERIC(3,0) OUTPUT'

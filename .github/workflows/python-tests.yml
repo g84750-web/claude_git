@@ -17,6 +17,7 @@ on:
       - 'icube-erp-reports/**'
       - 'tests/**'
       - 'requirements.txt'
+      - 'requirements-ci.txt'
       - '.github/workflows/python-tests.yml'
   push:
     branches: [main]
@@ -24,6 +25,7 @@ on:
       - 'icube-erp-reports/**'
       - 'tests/**'
       - 'requirements.txt'
+      - 'requirements-ci.txt'
       - '.github/workflows/python-tests.yml'
 
 # 최소 권한. 이 워크플로는 저장소를 읽기만 한다.
@@ -67,8 +69,13 @@ jobs:
       - name: 정적 검사 (SQL 46개)
         run: python icube-erp-reports/tools/lint_icube_sql.py
 
-      - name: 의존성 설치
-        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      # requirements.txt 는 범위로 열려 있어 매 실행마다 그때의 최신 버전을 받는다.
+      # 잠금 파일은 버전과 파일 해시를 함께 고정하고, --require-hashes 로
+      # 해시가 하나라도 어긋나면 설치를 통째로 거부한다.
+      - name: 의존성 설치 (버전·해시 고정)
+        run: |
+          python -m pip install --disable-pip-version-check \
+            --require-hashes -r requirements-ci.txt
 
       - name: 테스트
         run: python -m pytest tests/ -q

@@ -1286,4 +1286,39 @@ GO
      LSTKMOVE_D (CO_CD, WO_CD, ITEM_CD, WOBOM_SQ)
      SBOM_WF    (CO_CD, ITEMPARENT_CD, START_DT, END_DT)
      CIV_PUR_TAV(CO_CD, DIV_CD, P_YR, CHASU, ITEM_CD)
+
+  [ 도입 전 확인 ]
+  ----------------------------------------------------------------------------------------------
+
+  -- (1) ★ 프로젝트 축이 어디에 있는지 확인한다. 지시에 없으면 수주에서 끌어와야 한다
+     SELECT COUNT(*) 지시건수, SUM(CASE WHEN ISNULL(PJT_CD,'')<>'' THEN 1 ELSE 0 END) 프로젝트기재
+     FROM   LWO_WF WHERE CO_CD='1000';
+
+  -- (2) ★ 외주가공비 소스 확인. LOCLS 가 없으면 지시상 예정치로 대체된다
+     SELECT OBJECT_ID('dbo.LOCLS_H') H, OBJECT_ID('dbo.LOCLS_D') D;
+     --> NULL 이면 결과의 SRC_FG 가 '지시외주금액(LWO_WF_D)' 로 찍힌다. 확정치가 아니다.
+
+  -- (3) 원가 차수 마감 여부 (C-07 선행)
+     SELECT P_YR, CHASU, CLS_YN FROM CIV_CHASU WHERE CO_CD='1000' ORDER BY P_YR DESC, CHASU DESC;
+
+  -- (4) BATCH BOM 품목의 FOQ_QT 등록 여부. 미등록이면 소요량이 과대 계산된다
+     SELECT COUNT(*) FROM SITEM WHERE CO_CD='1000' AND ISNULL(FOQ_QT,0)=0
+       AND  ITEM_CD IN (SELECT ITEM_CD FROM SBOM_WF_B WHERE CO_CD='1000');
+
+  [ 한계 ]
+  ----------------------------------------------------------------------------------------------
+
+  1) **원가모듈에는 프로젝트 축이 없다.** 이 보고서는 물류·생산 데이터를 프로젝트로 재집계한
+     것이며, 원가계산 SP 가 확정한 금액과 일치하지 않는다. 회계 관점(A-06)과도 다르다.
+     세 관점 중 어느 하나가 정답이 아니라 **차이를 설명할 수 있어야** 한다.
+
+  2) **외주가공비는 `LOCLS_H`/`LOCLS_D`(외주마감) 가 정본**이다. 이 테이블이 없는 사이트에서는
+     `LWO_WF_D.LBR_AM`(지시상 예정치)으로 내려간다. 결과의 `SRC_FG` 컬럼으로 어느 쪽이
+     쓰였는지 반드시 확인할 것. 예정치는 정산 근거가 되지 못한다.
+
+  3) **간접비·판관비를 포함하지 않는다.** 재료비·외주비·가공비까지의 제조원가만 본다.
+
+  4) **BATCH BOM 은 `SITEM.FOQ_QT` 로 나눈다.** FOQ_QT 가 비어 있으면 배치 소요량이 그대로
+     단위 소요량으로 잡혀 재료비가 크게 부풀려진다. 도입 전 확인 (4) 를 반드시 돌릴 것.
+
 ==============================================================================================*/

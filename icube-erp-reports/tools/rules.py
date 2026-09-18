@@ -7,7 +7,7 @@
     VAL          CLAUDE.md 2장  확정 코드값 — 전 파일의 전제
     REG          CLAUDE.md 4장  개발 중 바로잡은 오류 (재발 감시)
     SAF          README         조회 전용 — 데이터를 변경하지 않는다
-    ENV          CLAUDE.md 9장  실행 환경 (SSMS 한글)
+    ENV          CLAUDE.md 9장  실행 환경 (SSMS 한글 · SQL Server 버전)
 
 심각도
     error  실 DB 에 올리기 전에 반드시 고친다
@@ -506,6 +506,118 @@ def rule_nolock(f: SqlFile) -> List[Finding]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# ENV002  요구 엔진 버전
+#
+# iCUBE 신규 설치는 SQL Server 2012 지만, 오래된 사이트는 2008 R2 로 남아 있다.
+# 2012 에서 들어온 구문은 2008 R2 에서 **구문 오류**로 거부되므로(호환성 수준과
+# 무관하다), 어느 파일이 2012 를 요구하는지 헤더에 적고 코드와 맞는지 검사한다.
+# ---------------------------------------------------------------------------
+
+#: 2012 에서 처음 들어온 함수
+_FN_2012 = re.compile(
+    r"\b(LAG|LEAD|PERCENTILE_CONT|PERCENTILE_DISC|CUME_DIST|PERCENT_RANK"
+    r"|FIRST_VALUE|LAST_VALUE|EOMONTH|IIF|CHOOSE|TRY_CONVERT|TRY_CAST|TRY_PARSE"
+    r"|CONCAT|FORMAT|DATEFROMPARTS|DATETIMEFROMPARTS)\s*\(", re.I)
+
+#: OFFSET … ROWS 페이징
+_OFFSET_2012 = re.compile(r"\bOFFSET\b[^\n;]{0,40}?\bROWS?\b", re.I)
+
+#: 2008 R2 의 OVER 는 집계함수에 PARTITION BY 만 허용한다.
+#: ORDER BY 가 붙을 수 있는 것은 순위함수뿐이고, 프레임 절은 아예 없다.
+_RANKING = {"ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE"}
+#: 자체가 2012 신규 함수라 _FN_2012 에서 이미 잡힌다 — 집계로 중복 보고하지 않는다
+_WINDOW_2012 = {"LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE",
+                "CUME_DIST", "PERCENT_RANK", "PERCENTILE_CONT", "PERCENTILE_DISC"}
+_FRAME = re.compile(r"\b(?:ROWS|RANGE)\s+BETWEEN\b", re.I)
+_ORDER_BY = re.compile(r"\bORDER\s+BY\b", re.I)
+_HDR_2012 = re.compile(r"^\s*DBMS\s*:.*2012\s*이상", re.M)
+
+
+def _balanced(code: str, start: int) -> str:
+    """start 뒤 첫 여는 괄호부터 짝이 맞는 닫는 괄호까지의 내용."""
+    i = code.find("(", start)
+    if i < 0:
+        return ""
+    depth = 0
+    for j in range(i, len(code)):
+        if code[j] == "(":
+            depth += 1
+        elif code[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return code[i + 1 : j]
+    return code[i + 1 :]
+
+
+def _fn_before(code: str, pos: int) -> str:
+    """OVER 앞의 인자목록을 거슬러 올라가 함수 이름을 찾는다."""
+    j = pos - 1
+    while j >= 0 and code[j].isspace():
+        j -= 1
+    if j < 0 or code[j] != ")":
+        return ""
+    depth = 0
+    while j >= 0:
+        if code[j] == ")":
+            depth += 1
+        elif code[j] == "(":
+            depth -= 1
+            if depth == 0:
+                break
+        j -= 1
+    end = j - 1
+    while end >= 0 and code[end].isspace():
+        end -= 1
+    beg = end
+    while beg >= 0 and (code[beg].isalnum() or code[beg] == "_"):
+        beg -= 1
+    return code[beg + 1 : end + 1].upper()
+
+
+def needs_2012(f: SqlFile) -> List[tuple]:
+    """2012 이상을 요구하는 지점을 (줄번호, 사유) 로 돌려준다."""
+    hits: List[tuple] = []
+    for unit in f.units:
+        for m in _FN_2012.finditer(unit.code):
+            hits.append((unit.line_at(m.start()), m.group(1).upper() + "()"))
+        for m in _OFFSET_2012.finditer(unit.code):
+            hits.append((unit.line_at(m.start()), "OFFSET/FETCH 페이징"))
+        for m in re.finditer(r"\bOVER\b", unit.code, re.I):
+            body = _balanced(unit.code, m.end())
+            line = unit.line_at(m.start())
+            if _FRAME.search(body):
+                hits.append((line, "OVER 프레임 (ROWS/RANGE BETWEEN)"))
+            fn = _fn_before(unit.code, m.start())
+            if (_ORDER_BY.search(body) and fn
+                    and fn not in _RANKING and fn not in _WINDOW_2012):
+                hits.append((line, "집계 %s() OVER(ORDER BY …)" % fn))
+    return hits
+
+
+def rule_engine_version(f: SqlFile) -> List[Finding]:
+    """2012 전용 구문을 쓰는 파일은 헤더 DBMS 줄에 그 사실을 적는다.
+
+    2008 R2 사이트에서 이 파일들은 실행 즉시 구문 오류가 난다. 어느 파일이
+    걸리는지 헤더만 보고 알 수 있어야 Z00 진단의 판정과 어긋나지 않는다.
+    """
+    hits = needs_2012(f)
+    declared = bool(_HDR_2012.search(f.raw[:4000]))
+    if hits and not declared:
+        why = sorted({w for _, w in hits})
+        tail = " 외" if len(why) > 3 else ""
+        return [Finding(
+            "ENV002", ERROR, f.name, min(l for l, _ in hits),
+            "2012 전용 구문을 쓰는데 헤더에 'MS-SQL Server 2012 이상' 이 없다"
+            " (%s%s)" % (", ".join(why[:3]), tail))]
+    if declared and not hits:
+        return [Finding(
+            "ENV002", WARN, f.name, 1,
+            "헤더는 2012 이상을 요구한다고 적었으나 2012 전용 구문이 없다"
+            " — 2008 R2 사이트에서도 쓸 수 있다")]
+    return []
+
+
 ALL_RULES: List[Callable[[SqlFile], List[Finding]]] = [
     rule_bom,
     rule_header,
@@ -525,4 +637,5 @@ ALL_RULES: List[Callable[[SqlFile], List[Finding]]] = [
     rule_paren_balance,
     rule_quote_balance,
     rule_nolock,
+    rule_engine_version,
 ]

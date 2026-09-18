@@ -11,6 +11,7 @@
   ----------------------------------------------------------------------------------------------
   [ 검사 단계 ]
   ----------------------------------------------------------------------------------------------
+     0단계  ★ 엔진 버전         2008 R2 면 24개가 구문 오류로 실행 불가
      1단계  테이블 실존          어떤 리포트를 쓸 수 있는가
      2단계  코드값 해석 ★★      EXPIRE_YN / DOC_ST / SO_FG … — 틀리면 전부 무의미
      3단계  마스터 등록률        리드타임·안전재고·단가·BOM
@@ -57,6 +58,85 @@ CREATE TABLE #R (
     ,NOTE  NVARCHAR(300)
 );
 
+
+/*==============================================================================================
+  0단계 : ★ DBMS 엔진 버전 — 다른 무엇보다 이것이 먼저다
+  ----------------------------------------------------------------------------------------------
+  iCUBE 신규 설치는 SQL Server 2012 지만, 오래된 사이트는 2008 R2 로 남아 있다.
+  2012 에서 들어온 구문은 2008 R2 에서 **구문 오류**로 거부된다 — 호환성 수준과 무관하다.
+
+      · LAG() / LEAD()                    전기 대비 증감
+      · 집계함수 + OVER(ORDER BY ...)     누적합·누적비율   ← 2008 R2 는 PARTITION BY 만 허용
+      · ROWS / RANGE BETWEEN 프레임       이동평균·누계
+      · PERCENTILE_CONT()                 중앙값·사분위
+      · EOMONTH()                         월말일
+
+  46개 중 24개가 여기 걸린다. **테이블이 다 있어도 실행 자체가 되지 않는다.**
+  호환성 수준(compatibility_level)은 별개 축이다. 80(2000 모드)이면 엔진이 2008 R2 여도
+  OVER() · CROSS/OUTER APPLY · CTE · EXCEPT 가 전부 막힌다.
+==============================================================================================*/
+DECLARE @VER     NVARCHAR(30) = CONVERT(NVARCHAR(30), SERVERPROPERTY('ProductVersion'));
+-- 버전 문자열을 못 읽으면 0 으로 둔다. 조용히 '문제없음'으로 흐르는 쪽보다
+-- 경보를 울리고 사람이 위의 버전 문자열을 직접 보게 하는 쪽이 안전하다.
+DECLARE @VER_MAJ INT          = ISNULL(CAST(PARSENAME(@VER, 4) AS INT), 0);
+DECLARE @EDITION NVARCHAR(60) = CONVERT(NVARCHAR(60), SERVERPROPERTY('Edition'));
+DECLARE @COMPAT  INT          = (SELECT compatibility_level FROM sys.databases WHERE database_id = DB_ID());
+
+INSERT INTO #R (STG,CAT,ITEM,VAL,LEVEL,NOTE)
+SELECT 0, N'엔진', N'SQL Server 버전'
+      ,@VER + N' (' + CONVERT(NVARCHAR(20), SERVERPROPERTY('ProductLevel')) + N')'
+      ,CASE WHEN @VER_MAJ >= 11 THEN N'정보' ELSE N'치명' END
+      ,CASE WHEN @VER_MAJ >= 11
+            THEN N'2012 이상 - 46개 전부 실행 가능'
+            ELSE N'★ 2008 R2 이하 - 2012 전용 구문을 쓰는 24개가 실행되지 않는다. 출력 3 의 ''X 엔진버전'' 을 볼 것' END;
+
+INSERT INTO #R (STG,CAT,ITEM,VAL,LEVEL,NOTE)
+SELECT 0, N'엔진', N'호환성 수준 (compatibility_level)', CAST(@COMPAT AS NVARCHAR(10))
+      ,CASE WHEN @COMPAT >= 90 THEN N'정보' ELSE N'치명' END
+      ,CASE WHEN @COMPAT >= 90
+            THEN N'90 이상 - 윈도우 함수 / APPLY / CTE / EXCEPT 사용 가능'
+            ELSE N'★ 80(SQL 2000 모드) - OVER() · APPLY · CTE · EXCEPT 가 전부 구문 오류. 대부분의 리포트를 쓸 수 없다' END;
+
+INSERT INTO #R (STG,CAT,ITEM,VAL,LEVEL,NOTE)
+SELECT 0, N'엔진', N'에디션', @EDITION
+      ,CASE WHEN @EDITION LIKE N'Express%' THEN N'경고' ELSE N'정보' END
+      ,CASE WHEN @EDITION LIKE N'Express%'
+            THEN N'Express - DB 당 10GB · 메모리 1GB · 코어 4 · SQL Agent 없음. 야간 배치는 Windows 작업 스케줄러 + sqlcmd 로'
+            ELSE N'자원 제한 없음' END;
+
+/*  2012 전용 구문을 쓰는 24개 — tools/lint_icube_sql.py 의 ENV002 규칙이 산출한 목록이다.
+    각 파일 헤더의 'DBMS : MS-SQL Server 2012 이상' 줄과 1:1 로 대응한다.
+    파일을 고치면 린터가 헤더와의 불일치를 잡아내므로 이 목록도 함께 갱신할 것.        */
+IF OBJECT_ID('tempdb..#V12') IS NOT NULL DROP TABLE #V12;
+-- COLLATE DATABASE_DEFAULT : #V12 는 tempdb(서버 정렬)에 만들어지는데 아래 매트릭스의
+-- 파일명은 DB 정렬을 따르는 리터럴이다. 둘이 다르면 조인에서 정렬 충돌 오류가 난다.
+CREATE TABLE #V12 (파일 NVARCHAR(80) COLLATE DATABASE_DEFAULT PRIMARY KEY, 사유 NVARCHAR(120));
+INSERT INTO #V12 (파일, 사유) VALUES
+     (N'A05_자금수지_전망.sql'     , N'PERCENTILE_CONT(), 집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'A06_프로젝트별손익_회계.sql'  , N'집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'C02_당기재료비_분석.sql'    , N'집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'C03_제품별_원가구성.sql'    , N'집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'C04_표준원가_차이분석.sql'   , N'집계 OVER(ORDER BY)')
+    ,(N'C05_매출이익_분석.sql'     , N'LAG()')
+    ,(N'C07_원가차수_마감점검.sql'   , N'EOMONTH(), LAG()')
+    ,(N'E02_수주출하_리드타임분석.sql' , N'LAG(), PERCENTILE_CONT()')
+    ,(N'M01_작업지시_진행현황.sql'   , N'LAG()')
+    ,(N'M02_생산일보_생산성.sql'    , N'LAG(), 집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'M05_자재_청구출고사용_현황.sql', N'집계 OVER(ORDER BY)')
+    ,(N'M06_불량파레토_품질KPI.sql' , N'LAG(), 집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'M11_생산계획대비실적.sql'    , N'LAG()')
+    ,(N'P02_발주납기준수_KPI.sql'  , N'LAG()')
+    ,(N'P04_재고수불_회전율분석.sql'  , N'집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'P07_매입단가_추이분석.sql'   , N'LAG()')
+    ,(N'P10_재고조정_현황.sql'     , N'LAG()')
+    ,(N'S03_납기준수율_KPI.sql'   , N'LAG(), 집계 OVER(ORDER BY)')
+    ,(N'S04_매출수금_채권KPI.sql'  , N'집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'S09_영업계획대비_실적.sql'   , N'집계 OVER(ORDER BY), 프레임 ROWS/RANGE')
+    ,(N'S11_수출현황.sql'        , N'LAG()')
+    ,(N'S12_거래처단가_이력.sql'    , N'LAG()')
+    ,(N'생산지시별_작업수율현황.sql'    , N'LAG(), 집계 OVER(ORDER BY)')
+    ,(N'원자재수급총괄현황_MRP.sql'   , N'집계 OVER(ORDER BY)')
+;
 
 /*==============================================================================================
   1단계 : 테이블 실존
@@ -502,7 +582,7 @@ FROM (VALUES
 ==============================================================================================*/
 SELECT
      N'[1] 진단 결과'                               AS REPORT_NM
-    ,단계 = CASE R.STG WHEN 1 THEN N'1.테이블 실존' WHEN 2 THEN N'2.★코드값 해석'
+    ,단계 = CASE R.STG WHEN 0 THEN N'0.★엔진 버전' WHEN 1 THEN N'1.테이블 실존' WHEN 2 THEN N'2.★코드값 해석'
                        WHEN 3 THEN N'3.마스터 등록률' WHEN 4 THEN N'4.문서 연결률'
                        ELSE N'5.모듈 운영' END
     ,R.CAT                                          AS 구분
@@ -539,10 +619,15 @@ DECLARE @치명 INT = (SELECT COUNT(*) FROM #R WHERE LEVEL = N'치명');
 SELECT
      N'[3] ★ 리포트 적용 판정'                     AS REPORT_NM
     ,X.차수, X.파일, X.전제조건
-    ,판정 = CASE WHEN X.OK = 1 THEN N'O 사용가능'
+    ,판정 = CASE WHEN V.파일 IS NOT NULL AND @VER_MAJ < 11 THEN N'X 엔진버전'
+                 WHEN X.OK = 1 THEN N'O 사용가능'
                  WHEN X.OK = 2 THEN N'△ 수정필요'
                  ELSE N'X 사용불가' END
-    ,X.조치
+    ,요구엔진 = CASE WHEN V.파일 IS NOT NULL THEN N'2012 이상' ELSE N'2008 R2 가능' END
+    ,조치 = CASE WHEN V.파일 IS NOT NULL AND @VER_MAJ < 11
+                 THEN N'★ SQL Server 2012 이상 필요 (' + V.사유 + N'). 현재 ' + @VER
+                    + N' — 엔진을 올리거나, 2012+ 인스턴스에 리포팅 복제본을 두고 거기서 실행할 것'
+                 ELSE X.조치 END
 FROM (
     -- 기준정보
      SELECT 순서=1 ,차수=N'1차',파일=N'B01_마스터품질_스코어카드.sql'    ,전제조건=N'SITEM'
@@ -694,7 +779,12 @@ FROM (
            ,CASE WHEN OBJECT_ID(N'dbo.LSO_D') IS NOT NULL THEN 2 ELSE 0 END
            ,N'수주→지시 연결률 30% 미만이면 생산 경로 분석 신뢰도 낮음'
 ) X
-ORDER BY CASE X.OK WHEN 0 THEN 1 WHEN 2 THEN 2 ELSE 3 END, X.순서
+LEFT JOIN #V12 V ON V.파일 = X.파일
+ORDER BY CASE WHEN V.파일 IS NOT NULL AND @VER_MAJ < 11 THEN 0
+              WHEN X.OK = 0 THEN 1
+              WHEN X.OK = 2 THEN 2
+              ELSE 3 END
+        ,X.순서
 ;
 
 
@@ -705,26 +795,36 @@ SELECT
      N'[4] 종합 판정'                               AS REPORT_NM
     ,@CO_CD + N' / ' + ISNULL(@DIV_CD, N'전사') + N' / ' + @P_YR  AS 진단대상
     ,CONVERT(NVARCHAR(20), GETDATE(), 120)          AS 진단시각
+    ,@VER + N' / compat ' + CAST(@COMPAT AS NVARCHAR(10))         AS 엔진
+    ,실행불가_엔진 = CASE WHEN @VER_MAJ < 11 THEN (SELECT COUNT(*) FROM #V12) ELSE 0 END
     ,치명 = (SELECT COUNT(*) FROM #R WHERE LEVEL = N'치명')
     ,경고 = (SELECT COUNT(*) FROM #R WHERE LEVEL = N'경고')
     ,정보 = (SELECT COUNT(*) FROM #R WHERE LEVEL = N'정보')
     ,필수테이블_누락 = (SELECT COUNT(*) FROM #T WHERE 필수=N'1' AND 존재=N'X')
     ,선택테이블_보유 = (SELECT COUNT(*) FROM #T WHERE 필수=N'0' AND 존재=N'O')
     ,판정 = CASE
+         WHEN @COMPAT < 90
+              THEN N'1.★★호환성 수준 ' + CAST(@COMPAT AS NVARCHAR(10))
+                 + N' - OVER()/APPLY/CTE 가 전부 막힌다. 이것부터 해결하지 않으면 대부분 실행 불가'
+         WHEN @VER_MAJ < 11
+              THEN N'2.★★SQL Server ' + @VER + N' - 2012 전용 구문을 쓰는 '
+                 + CAST((SELECT COUNT(*) FROM #V12) AS NVARCHAR(10))
+                 + N'개가 실행 불가. 출력 3 의 ''X 엔진버전'' 참조'
          WHEN (SELECT COUNT(*) FROM #T WHERE 필수=N'1' AND 존재=N'X') > 0
-              THEN N'1.★★필수 테이블 누락 - 해당 모듈을 제외하고 적용 범위를 다시 정할 것'
+              THEN N'3.★★필수 테이블 누락 - 해당 모듈을 제외하고 적용 범위를 다시 정할 것'
          WHEN @치명 > 0
-              THEN N'2.★치명 항목 ' + CAST(@치명 AS NVARCHAR(10)) + N'건 - 출력 1 의 치명 항목을 먼저 해결'
+              THEN N'4.★치명 항목 ' + CAST(@치명 AS NVARCHAR(10)) + N'건 - 출력 1 의 치명 항목을 먼저 해결'
          WHEN (SELECT COUNT(*) FROM #R WHERE LEVEL=N'경고') > 5
-              THEN N'3.경고 다수 - 출력 3 의 ''수정필요'' 파일을 조정한 뒤 적용'
+              THEN N'5.경고 다수 - 출력 3 의 ''수정필요'' 파일을 조정한 뒤 적용'
          ELSE N'0.양호 - 출력 3 의 ''사용가능'' 부터 순서대로 적용' END
-    ,다음단계 = N'① 출력 3 매트릭스에서 ''사용가능''부터 적용  '
+    ,다음단계 = N'⓪ 엔진이 2008 R2 면 ''X 엔진버전'' 24개를 먼저 처리  '
+              + N'① 출력 3 매트릭스에서 ''사용가능''부터 적용  '
               + N'② ''수정필요''는 조치 컬럼대로 파일 수정  '
               + N'③ 2단계 코드값이 전제와 다르면 전 파일 일괄 수정이 최우선'
 ;
 
 
-DROP TABLE #T, #R;
+DROP TABLE #T, #R, #V12;
 GO
 
 

@@ -103,6 +103,7 @@ tools/lint_icube_sql.py         ★ 정적 검사. 수정할 때마다 실행
 tools/flip_expire_yn.py         EXPIRE_YN 극성 전 파일 일괄 반전
 tools/tsql_parse.py             주석·문자열·동적 SQL 분해기
 tools/rules.py                  검사 규칙 (CLAUDE.md 2·4·6장)
+tools/refresh_replica.ps1       리포팅 복제본 갱신 (작업 스케줄러용)
 ```
 
 ### 진단·적용 (3)

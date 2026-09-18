@@ -327,50 +327,92 @@ GO
 /*==============================================================================================
   [ 이전 절차 ] — 2008 R2 인스턴스 → 2017 인스턴스
   ----------------------------------------------------------------------------------------------
-  아래는 그대로 실행하는 것이 아니라 **한 단계씩 확인하며** 진행한다.
+  **전부 SSMS 쿼리 창에서 실행하는 T-SQL 이다.** PowerShell 명령을 SSMS 창에 붙이면
+  `'$i' 근처의 구문이 잘못되었습니다` 같은 오류가 난다. 아래에는 셸 명령이 없다.
+
+  **단계마다 접속 대상이 다르다.** SSMS 쿼리 창에서 우클릭 > [연결] > [연결 변경] 으로
+  바꾸고, 창 아래 상태표시줄에서 지금 어디에 붙어 있는지 **매번 확인한다.**
+  서버 이름은 목록에 없어도 직접 입력하면 된다 (`.\ICUBE`, `.\SQLEXPRESS01`).
+
   원본 인스턴스는 끝까지 건드리지 않는다. 잘못되면 되돌릴 자리가 거기다.
+  되돌리기는 대상에서 `DROP DATABASE [DZICUBE];` 하나면 끝난다.
 
-  1) 원본에서 이 파일을 먼저 실행한다 (기준값 확보)
+  ─ 1) 【원본】 이 파일을 먼저 실행한다 (기준값 확보)
+        출력 [2] 가 5종 모두 'X 실패' 로 나온다. 그것이 지금 상태의 기준값이다.
 
-  2) 원본에서 전체 백업 — COPY_ONLY 라 기존 백업 체인을 건드리지 않는다
-       BACKUP DATABASE [DZICUBE] TO DISK = N'D:\MIG\DZICUBE.bak'
-         WITH COPY_ONLY, INIT, CHECKSUM, STATS = 5;
-       -- 압축(COMPRESSION)은 Express 에서 지원되지 않으므로 넣지 않는다
+  ─ 2) 【원본】과 【대상】 각각에서 경로·여유공간을 확인한다
+        EXEC master.dbo.xp_fixeddrives;        -- 드라이브별 여유 MB
 
-  3) 대상(2017)에서 논리 파일명 확인
-       RESTORE FILELISTONLY FROM DISK = N'D:\MIG\DZICUBE.bak';
+        DECLARE @p NVARCHAR(4000);
+        EXEC master.dbo.xp_instance_regread N'HKEY_LOCAL_MACHINE',
+             N'Software\Microsoft\MSSQLServer\MSSQLServer', N'BackupDirectory', @p OUTPUT;
+        SELECT @p AS 기본백업경로;
 
-  4) 대상에서 복원 — 2 에서 본 논리명, 대상 인스턴스의 DATA 경로를 쓴다
-       RESTORE DATABASE [DZICUBE] FROM DISK = N'D:\MIG\DZICUBE.bak'
-         WITH MOVE N'<논리데이터명>' TO N'<대상DATA경로>\DZICUBE.mdf'
-            , MOVE N'<논리로그명>'   TO N'<대상DATA경로>\DZICUBE_log.ldf'
-            , RECOVERY, STATS = 5;
+        -- 대상에서는 데이터 파일을 놓을 경로도 함께 본다 (2012 이상에서만 나온다)
+        SELECT SERVERPROPERTY('InstanceDefaultDataPath') AS 데이터경로
+             , SERVERPROPERTY('InstanceDefaultLogPath')  AS 로그경로;
 
-  5) ★ 호환성 수준을 올린다 — 이것을 빠뜨리면 여기까지 온 의미가 없다
-       ALTER DATABASE [DZICUBE] SET COMPATIBILITY_LEVEL = 140;   -- 2017 기본
-       -- 리포팅 전용 복제본이면 140. iCUBE 운영을 옮기는 것이면 110 부터 시작해
-       -- 단계적으로 올린다. 120 이상은 쿼리 최적화기(카디널리티 추정)가 바뀌어
-       -- 더존 저장프로시저의 실행계획이 달라질 수 있다.
+        ★ **각 인스턴스의 기본 백업 폴더를 쓴다.** 서비스 계정이 자기 폴더에 대한
+          권한을 이미 갖고 있으므로, 공용 폴더를 만들고 icacls 로 권한을 주는 일을
+          통째로 건너뛸 수 있다. 백업본 4.5GB + 복원본 4.5GB 가 들어갈 여유가 필요하다.
 
-  6) 무결성·통계 정비 — 버전을 건너뛴 DB 는 이것을 한 번 해줘야 한다
-       DBCC CHECKDB ([DZICUBE]) WITH DATA_PURITY, NO_INFOMSGS;
-       EXEC sp_updatestats;
+  ─ 3) 【원본】 전체 백업 — COPY_ONLY 라 기존 백업 체인을 건드리지 않는다
+        BACKUP DATABASE [DZICUBE]
+            TO DISK = N'<원본백업경로>DZICUBE_MIG.bak'
+            WITH COPY_ONLY, INIT, CHECKSUM, STATS = 5;
+        -- 압축(COMPRESSION)은 Express 에서 지원되지 않으므로 넣지 않는다
+        -- 경로 끝에 역슬래시가 이미 붙어 있는지 확인할 것
 
-  7) 구식 조인 확인 — 더존 뷰·함수에 `*=` 가 있으면 compat 90 이상에서 깨진다
-       SELECT o.type_desc, o.name
-       FROM   sys.sql_modules m
-       JOIN   sys.objects o ON o.object_id = m.object_id
-       WHERE  m.definition LIKE N'%*=%' OR m.definition LIKE N'%=*%';
-       -- 0 건이면 안전. 나오면 그 객체를 쓰는 리포트만 따로 점검한다
+  ─ 4) 【SSMS 밖】 파일 탐색기로 .bak 을 <대상백업경로> 폴더로 복사한다
+        여기만 SSMS 밖에서 한다. 권한을 물으면 [계속] 을 누른다.
 
-  8) 로그인 정리 — 이 파일 출력 [3] 의 복구명령을 쓴다.
-     원본과 같은 SID 로 만들어야 권한이 그대로 따라온다
-       -- 원본에서 : SELECT name, sid FROM sys.server_principals WHERE principal_id > 4;
-       -- 대상에서 : CREATE LOGIN [이름] WITH PASSWORD = 0x... HASHED, SID = 0x...;
+  ─ 5) 【대상】 논리 파일명 확인
+        RESTORE FILELISTONLY FROM DISK = N'<대상백업경로>DZICUBE_MIG.bak';
+        -- 결과 그리드의 LogicalName 열에서 데이터·로그 두 값을 적어 둔다
 
-  9) **대상에서 이 파일을 다시 실행** — 출력 [2] 가 5/5 실행됨이어야 한다
+  ─ 6) 【대상】 복원 — 5 에서 본 논리명, 2 에서 본 데이터 경로를 쓴다
+        RESTORE DATABASE [DZICUBE]
+            FROM DISK = N'<대상백업경로>DZICUBE_MIG.bak'
+            WITH MOVE N'<데이터 LogicalName>' TO N'<데이터경로>DZICUBE.mdf'
+               , MOVE N'<로그 LogicalName>'   TO N'<로그경로>DZICUBE_log.ldf'
+               , RECOVERY, STATS = 5;
 
- 10) Z00_사이트진단.sql 실행 — 출력 [3] 매트릭스에 'X 엔진버전' 이 사라졌는지 확인
+  ─ 7) 【대상】 ★ 호환성 수준을 올린다 — 이것을 빠뜨리면 여기까지 온 의미가 없다
+        ALTER DATABASE [DZICUBE] SET COMPATIBILITY_LEVEL = 140;   -- 2017 기본
+
+        복원된 DB 는 원본의 호환성 수준(보통 100)을 **그대로 물고 온다.** 자동으로
+        올라가지 않는다. LAG() 등은 110 이상을 요구하므로, 이 줄이 없으면 엔진이
+        2017 이어도 24개가 그대로 실패한다.
+
+        리포팅 전용 복제본이면 140. iCUBE 운영을 옮기는 것이면 110 부터 시작해
+        단계적으로 올린다. 120 이상은 쿼리 최적화기(카디널리티 추정)가 바뀌어
+        더존 저장프로시저의 실행계획이 달라질 수 있다.
+
+  ─ 8) 【대상】 무결성·통계 정비 — 버전을 건너뛴 DB 는 이것을 한 번 해줘야 한다
+        DBCC CHECKDB ([DZICUBE]) WITH DATA_PURITY, NO_INFOMSGS;
+        GO
+        USE DZICUBE;
+        GO
+        EXEC sp_updatestats;
+
+  ─ 9) 【대상·DZICUBE】 구식 조인 확인
+        더존 뷰·함수에 `*=` 가 있으면 호환성 수준 90 이상에서 깨진다
+        SELECT o.type_desc, o.name
+        FROM   sys.sql_modules m
+        JOIN   sys.objects o ON o.object_id = m.object_id
+        WHERE  m.definition LIKE N'%*=%' OR m.definition LIKE N'%=*%';
+        -- 0 건이면 안전. 나오면 그 객체를 쓰는 리포트만 따로 점검한다
+
+  ─ 10) 【대상】 로그인 정리 — 이 파일 출력 [3] 의 복구명령을 쓴다.
+        원본과 같은 SID 로 만들어야 권한이 그대로 따라온다
+        -- 원본에서 : SELECT name, sid FROM sys.server_principals WHERE principal_id > 4;
+        -- 대상에서 : CREATE LOGIN [이름] WITH PASSWORD = 0x... HASHED, SID = 0x...;
+
+  ─ 11) 【대상·DZICUBE】 **이 파일을 다시 실행** — 출력 [2] 가 5/5 실행됨이어야 한다
+        1) 의 기준값과 나란히 놓고 비교한다. 그것이 이전이 끝났다는 증거다.
+
+  ─ 12) 【대상·DZICUBE】 Z00_사이트진단.sql 실행
+        출력 [3] 매트릭스에서 'X 엔진버전' 이 사라졌는지 확인한다.
 
   ----------------------------------------------------------------------------------------------
   [ 여기서 갈린다 — 무엇을 옮기는가 ]

@@ -49,7 +49,7 @@ SQL_FILES = sorted(glob.glob(os.path.join(PACK, "*.sql")))
 
 
 def test_pack_is_not_empty():
-    assert len(SQL_FILES) == 46, "리포트 46개가 모두 있어야 한다"
+    assert len(SQL_FILES) == 47, "리포트 46개 + 이전 점검 Z-01 이 모두 있어야 한다"
 
 
 @pytest.mark.parametrize("path", SQL_FILES, ids=os.path.basename)
@@ -215,7 +215,7 @@ def test_flip_round_trip(tmp_path):
 
 import re  # noqa: E402
 
-from rules import WARN, needs_2012  # noqa: E402
+from rules import WARN, engine_2012_required, lint_ignored, needs_2012  # noqa: E402
 
 HDR_2012 = HEADER.replace(
     "[ iCUBE ] 테스트", "[ iCUBE ] 테스트\n  DBMS : MS-SQL Server 2012 이상 (T-SQL)")
@@ -273,8 +273,9 @@ def test_declaring_2012_without_using_it_warns():
 # ── 헤더 · Z00 · 규칙 세 곳이 어긋나지 않는가 ────────────────────────
 
 def _pack_needs_2012():
+    """면제 선언까지 반영한 목록 — 규칙·Z00·헤더가 모두 이 기준을 따라야 한다."""
     from lint_icube_sql import load
-    return {os.path.basename(p) for p in SQL_FILES if needs_2012(load(p))}
+    return {os.path.basename(p) for p in SQL_FILES if engine_2012_required(load(p))}
 
 
 def _z00_v12_list():
@@ -305,3 +306,46 @@ def test_headers_match_rule():
 def test_z00_declares_nothing_it_cannot_run():
     """진단 파일 자신은 2008 R2 에서 돌아야 한다 — 안 돌면 진단을 못 본다."""
     assert "Z00_사이트진단.sql" not in _pack_needs_2012()
+
+
+# ── 면제 선언 ────────────────────────────────────────────────────────
+#
+# 구버전에서 실패하는 것이 **의도**인 파일이 하나 있다 — Z-01 이전 점검은 2012
+# 구문을 일부러 실행해 보고 실패를 TRY/CATCH 로 받는다. 그것까지 error 로 잡으면
+# 규칙이 옳은 코드를 막는다. 다만 사유 없는 면제는 규칙을 끄는 것과 같으므로
+# 받지 않는다.
+
+PROBE = "SELECT LAG(A.X) OVER (ORDER BY A.Y) FROM T A WITH (NOLOCK);"
+
+
+def _hdr_with(line):
+    return HEADER.replace("[ iCUBE ] 테스트", "[ iCUBE ] 테스트\n  " + line)
+
+
+def test_lint_ignore_with_reason_is_honoured():
+    head = _hdr_with("lint-ignore : ENV002 — 구버전에서 실패하는 것이 이 파일의 동작이다")
+    assert _env002(PROBE, head) == []
+
+
+def test_lint_ignore_without_reason_is_not_honoured():
+    """사유를 안 적으면 면제가 아니다 — 규칙을 조용히 끄는 통로를 만들지 않는다."""
+    assert [x.rule for x in _env002(PROBE, _hdr_with("lint-ignore : ENV002"))] == ["ENV002"]
+    assert [x.rule for x in _env002(PROBE, _hdr_with("lint-ignore : ENV002 —"))] == ["ENV002"]
+
+
+def test_lint_ignore_does_not_leak_to_other_rules():
+    """ENV002 면제가 다른 규칙까지 풀어주면 안 된다."""
+    head = _hdr_with("lint-ignore : ENV002 — 사유")
+    rules_hit = {x.rule for x in _findings("UPDATE SITEM SET STD_UM = 0;", head)}
+    assert "SAF001" in rules_hit
+
+
+def test_only_the_migration_check_is_exempt():
+    """면제가 조용히 늘어나지 않게 잠근다. 늘리려면 이 테스트를 함께 고쳐야 한다."""
+    from lint_icube_sql import load
+    exempt = {os.path.basename(p) for p in SQL_FILES if lint_ignored(load(p), "ENV002")}
+    assert exempt == {"Z01_인스턴스이전_점검.sql"}
+    # 면제된 파일은 실제로 2012 구문을 쓰고 있어야 한다 — 쓰지도 않으면서 면제받는 것은 군더더기다
+    for name in exempt:
+        f = load(os.path.join(PACK, name))
+        assert needs_2012(f), name

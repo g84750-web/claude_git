@@ -533,6 +533,17 @@ _FRAME = re.compile(r"\b(?:ROWS|RANGE)\s+BETWEEN\b", re.I)
 _ORDER_BY = re.compile(r"\bORDER\s+BY\b", re.I)
 _HDR_2012 = re.compile(r"^\s*DBMS\s*:.*2012\s*이상", re.M)
 
+#: 헤더의 명시적 예외 선언. **사유를 반드시 적어야** 인정한다 —
+#: 사유 없는 침묵은 규칙을 끄는 것이지 예외가 아니다.
+#: 가로 공백만 허용한다. `\s*` 로 쓰면 개행을 삼켜 **다음 줄 첫 글자**를
+#: 사유로 오인하고, 사유 없는 면제가 통과한다.
+_IGNORE = r"^[ \t]*lint-ignore[ \t]*:[ \t]*{rule}[ \t]*[-—–][ \t]*\S"
+
+
+def lint_ignored(f: SqlFile, rule: str) -> bool:
+    """헤더에 `lint-ignore : <규칙> — <사유>` 가 있으면 그 규칙을 면제한다."""
+    return re.search(_IGNORE.format(rule=rule), f.raw[:4000], re.M) is not None
+
 
 def _balanced(code: str, start: int) -> str:
     """start 뒤 첫 여는 괄호부터 짝이 맞는 닫는 괄호까지의 내용."""
@@ -595,13 +606,21 @@ def needs_2012(f: SqlFile) -> List[tuple]:
     return hits
 
 
+def engine_2012_required(f: SqlFile) -> List[tuple]:
+    """면제 선언까지 반영한 최종 판정. 규칙·Z00 목록·테스트가 모두 이것을 본다."""
+    return [] if lint_ignored(f, "ENV002") else needs_2012(f)
+
+
 def rule_engine_version(f: SqlFile) -> List[Finding]:
     """2012 전용 구문을 쓰는 파일은 헤더 DBMS 줄에 그 사실을 적는다.
 
     2008 R2 사이트에서 이 파일들은 실행 즉시 구문 오류가 난다. 어느 파일이
     걸리는지 헤더만 보고 알 수 있어야 Z00 진단의 판정과 어긋나지 않는다.
+
+    구버전에서 실패하는 것이 의도인 파일(Z-01 이전 점검)은 헤더에 사유를 적어
+    면제할 수 있다.
     """
-    hits = needs_2012(f)
+    hits = engine_2012_required(f)
     declared = bool(_HDR_2012.search(f.raw[:4000]))
     if hits and not declared:
         why = sorted({w for _, w in hits})

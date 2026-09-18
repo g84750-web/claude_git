@@ -49,7 +49,7 @@ SQL_FILES = sorted(glob.glob(os.path.join(PACK, "*.sql")))
 
 
 def test_pack_is_not_empty():
-    assert len(SQL_FILES) == 46, "리포트 46개가 모두 있어야 한다"
+    assert len(SQL_FILES) == 47, "리포트 46개 + 이전 점검 Z-01 이 모두 있어야 한다"
 
 
 @pytest.mark.parametrize("path", SQL_FILES, ids=os.path.basename)
@@ -87,6 +87,7 @@ def test_has_utf8_bom(path):
     ("QUL003", "SELECT 1 FROM SITEM I;", {}),
     ("HDR001", "SELECT 1;", {"header": False}),
     ("ENV001", "SELECT N'한글' AS 별칭;", {"bom": False}),
+    ("ENV002", "SELECT LAG(X) OVER (ORDER BY Y) FROM T WITH (NOLOCK);", {}),
 ])
 def test_rule_fires(rule, body, kw):
     """규칙마다 반드시 잡아야 할 최소 사례. 죽은 규칙을 막는다."""
@@ -201,3 +202,150 @@ def test_flip_round_trip(tmp_path):
 
     twice, _, _ = flip_expire_yn.process(str(work))
     assert twice == open(src, "rb").read().decode("utf-8-sig")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. ENV002 — 요구 엔진 버전
+#
+# 사이트가 2008 R2 로 남아 있는 경우가 실제로 있다. 2012 전용 구문은 그 서버에서
+# 구문 오류로 거부되므로, 어느 파일이 걸리는지 헤더와 Z00 진단이 함께 알아야 한다.
+# 여기서 잠그는 것은 세 가지다 — 경계선이 맞는가, 동적 SQL 안도 보는가,
+# 그리고 헤더·Z00·규칙 세 곳의 목록이 서로 어긋나지 않는가.
+# ─────────────────────────────────────────────────────────────────────
+
+import re  # noqa: E402
+
+from rules import WARN, engine_2012_required, lint_ignored, needs_2012  # noqa: E402
+
+HDR_2012 = HEADER.replace(
+    "[ iCUBE ] 테스트", "[ iCUBE ] 테스트\n  DBMS : MS-SQL Server 2012 이상 (T-SQL)")
+
+
+def _findings(body, header=HEADER):
+    raw = header + body
+    f = SqlFile(path="T.sql", name="T.sql", raw=raw, has_bom=True, units=build_units(raw))
+    return [x for r in ALL_RULES for x in r(f)]
+
+
+def _env002(body, header=HEADER):
+    return [x for x in _findings(body, header) if x.rule == "ENV002"]
+
+
+def test_ranking_over_order_by_is_fine_on_2008r2():
+    """ROW_NUMBER() OVER (ORDER BY ..) 는 2005 부터 된다 — 잡으면 안 된다."""
+    body = "SELECT ROW_NUMBER() OVER (ORDER BY A.X) FROM T A WITH (NOLOCK);"
+    assert _env002(body) == []
+
+
+def test_aggregate_over_order_by_needs_2012():
+    """반면 집계함수에 ORDER BY 가 붙으면 2012 가 필요하다."""
+    body = "SELECT SUM(A.X) OVER (ORDER BY A.Y) FROM T A WITH (NOLOCK);"
+    assert [x.rule for x in _env002(body)] == ["ENV002"]
+
+
+def test_window_frame_needs_2012():
+    body = ("SELECT SUM(A.X) OVER (PARTITION BY A.G ORDER BY A.Y"
+            " ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+            " FROM T A WITH (NOLOCK);")
+    assert [x.rule for x in _env002(body)] == ["ENV002"]
+
+
+def test_env002_reads_inside_dynamic_sql():
+    """C03 은 2012 전용 구문이 동적 SQL 문자열 안에만 있었다 — 그래서 놓쳤었다."""
+    body = ("DECLARE @S NVARCHAR(MAX) = N'SELECT SUM(A.X) OVER (ORDER BY A.Y)"
+            " FROM T A WITH (NOLOCK)';\nEXEC sp_executesql @S;")
+    assert [x.rule for x in _env002(body)] == ["ENV002"]
+
+
+def test_declared_header_silences_env002():
+    body = "SELECT LAG(A.X) OVER (ORDER BY A.Y) FROM T A WITH (NOLOCK);"
+    assert [x.rule for x in _env002(body)] == ["ENV002"]   # 선언이 없으면 잡고
+    assert _env002(body, HDR_2012) == []                   # 선언하면 조용하다
+
+
+def test_declaring_2012_without_using_it_warns():
+    """2008 R2 사이트에서 쓸 수 있는 파일을 못 쓰게 표시해두는 것도 오류다."""
+    body = "SELECT ROW_NUMBER() OVER (ORDER BY A.X) FROM T A WITH (NOLOCK);"
+    got = _env002(body, HDR_2012)
+    assert [x.severity for x in got] == [WARN]
+
+
+# ── 헤더 · Z00 · 규칙 세 곳이 어긋나지 않는가 ────────────────────────
+
+def _pack_needs_2012():
+    """면제 선언까지 반영한 목록 — 규칙·Z00·헤더가 모두 이 기준을 따라야 한다."""
+    from lint_icube_sql import load
+    return {os.path.basename(p) for p in SQL_FILES if engine_2012_required(load(p))}
+
+
+def _z00_v12_list():
+    z = open(os.path.join(PACK, "Z00_사이트진단.sql"), encoding="utf-8-sig").read()
+    seg = z[z.index("INSERT INTO #V12"):]
+    seg = seg[: seg.index("\n;")]
+    return set(re.findall(r"N'([^']+\.sql)'", seg))
+
+
+def test_z00_engine_list_matches_rule():
+    """Z00 의 #V12 목록이 규칙 판정과 어긋나면 진단이 거짓말을 한다."""
+    assert _z00_v12_list() == _pack_needs_2012()
+
+
+def test_headers_match_rule():
+    """각 파일 헤더의 'DBMS : … 2012 이상' 선언이 실제 코드와 일치한다."""
+    need = _pack_needs_2012()
+    wrong = []
+    for path in SQL_FILES:
+        name = os.path.basename(path)
+        head = open(path, encoding="utf-8-sig").read(4000)
+        declared = re.search(r"^\s*DBMS\s*:.*2012\s*이상", head, re.M) is not None
+        if declared != (name in need):
+            wrong.append(f"{name}: 헤더={declared} 실제={name in need}")
+    assert not wrong, "헤더 선언과 코드가 어긋난다\n  " + "\n  ".join(wrong)
+
+
+def test_z00_declares_nothing_it_cannot_run():
+    """진단 파일 자신은 2008 R2 에서 돌아야 한다 — 안 돌면 진단을 못 본다."""
+    assert "Z00_사이트진단.sql" not in _pack_needs_2012()
+
+
+# ── 면제 선언 ────────────────────────────────────────────────────────
+#
+# 구버전에서 실패하는 것이 **의도**인 파일이 하나 있다 — Z-01 이전 점검은 2012
+# 구문을 일부러 실행해 보고 실패를 TRY/CATCH 로 받는다. 그것까지 error 로 잡으면
+# 규칙이 옳은 코드를 막는다. 다만 사유 없는 면제는 규칙을 끄는 것과 같으므로
+# 받지 않는다.
+
+PROBE = "SELECT LAG(A.X) OVER (ORDER BY A.Y) FROM T A WITH (NOLOCK);"
+
+
+def _hdr_with(line):
+    return HEADER.replace("[ iCUBE ] 테스트", "[ iCUBE ] 테스트\n  " + line)
+
+
+def test_lint_ignore_with_reason_is_honoured():
+    head = _hdr_with("lint-ignore : ENV002 — 구버전에서 실패하는 것이 이 파일의 동작이다")
+    assert _env002(PROBE, head) == []
+
+
+def test_lint_ignore_without_reason_is_not_honoured():
+    """사유를 안 적으면 면제가 아니다 — 규칙을 조용히 끄는 통로를 만들지 않는다."""
+    assert [x.rule for x in _env002(PROBE, _hdr_with("lint-ignore : ENV002"))] == ["ENV002"]
+    assert [x.rule for x in _env002(PROBE, _hdr_with("lint-ignore : ENV002 —"))] == ["ENV002"]
+
+
+def test_lint_ignore_does_not_leak_to_other_rules():
+    """ENV002 면제가 다른 규칙까지 풀어주면 안 된다."""
+    head = _hdr_with("lint-ignore : ENV002 — 사유")
+    rules_hit = {x.rule for x in _findings("UPDATE SITEM SET STD_UM = 0;", head)}
+    assert "SAF001" in rules_hit
+
+
+def test_only_the_migration_check_is_exempt():
+    """면제가 조용히 늘어나지 않게 잠근다. 늘리려면 이 테스트를 함께 고쳐야 한다."""
+    from lint_icube_sql import load
+    exempt = {os.path.basename(p) for p in SQL_FILES if lint_ignored(load(p), "ENV002")}
+    assert exempt == {"Z01_인스턴스이전_점검.sql"}
+    # 면제된 파일은 실제로 2012 구문을 쓰고 있어야 한다 — 쓰지도 않으면서 면제받는 것은 군더더기다
+    for name in exempt:
+        f = load(os.path.join(PACK, name))
+        assert needs_2012(f), name
